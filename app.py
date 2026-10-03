@@ -1,9 +1,10 @@
 import os
+from pathlib import Path
 
 import gradio as gr
 import numpy as np
 import onnxruntime as ort
-from huggingface_hub import hf_hub_download
+from huggingface_hub import snapshot_download
 from PIL import Image
 
 
@@ -17,6 +18,8 @@ MODEL_FILE = "reproduced_A0_resnet50.onnx"
 MODEL_DATA_FILE = "reproduced_A0_resnet50.onnx.data"
 
 NUM_CLASSES = 45
+
+MODEL_DIR = Path("/tmp/retinal_ai_model")
 
 
 DISEASE_LABELS = [
@@ -69,28 +72,37 @@ DISEASE_LABELS = [
 
 
 # ============================================================
-# Download ONNX model from Hugging Face
+# Download complete model repository
+# into one physical directory
 # ============================================================
 
 print("Downloading ONNX model from Hugging Face...")
 
-MODEL_PATH = hf_hub_download(
-    repo_id=HF_REPO_ID,
-    filename=MODEL_FILE
+MODEL_DIR.mkdir(
+    parents=True,
+    exist_ok=True
 )
 
-MODEL_DATA_PATH = hf_hub_download(
+snapshot_download(
     repo_id=HF_REPO_ID,
-    filename=MODEL_DATA_FILE
+    local_dir=str(MODEL_DIR),
+    allow_patterns=[
+        MODEL_FILE,
+        MODEL_DATA_FILE
+    ]
 )
 
 
-if not os.path.exists(MODEL_PATH):
+MODEL_PATH = MODEL_DIR / MODEL_FILE
+MODEL_DATA_PATH = MODEL_DIR / MODEL_DATA_FILE
+
+
+if not MODEL_PATH.exists():
     raise FileNotFoundError(
         f"ONNX model not found: {MODEL_PATH}"
     )
 
-if not os.path.exists(MODEL_DATA_PATH):
+if not MODEL_DATA_PATH.exists():
     raise FileNotFoundError(
         f"ONNX external data file not found: {MODEL_DATA_PATH}"
     )
@@ -108,7 +120,7 @@ print("External data:", MODEL_DATA_PATH)
 print("Creating ONNX Runtime CPU session...")
 
 session = ort.InferenceSession(
-    MODEL_PATH,
+    str(MODEL_PATH),
     providers=["CPUExecutionProvider"]
 )
 
@@ -138,10 +150,6 @@ STD = np.array(
 
 
 def preprocess_image(image):
-    """
-    Convert uploaded retinal image into the exact
-    input format expected by the trained A0 model.
-    """
 
     image = image.convert("RGB")
 
@@ -159,19 +167,19 @@ def preprocess_image(image):
         image_array - MEAN
     ) / STD
 
-    # HWC -> CHW
     image_array = np.transpose(
         image_array,
         (2, 0, 1)
     )
 
-    # Add batch dimension
     image_array = np.expand_dims(
         image_array,
         axis=0
     )
 
-    return image_array.astype(np.float32)
+    return image_array.astype(
+        np.float32
+    )
 
 
 # ============================================================
@@ -179,9 +187,6 @@ def preprocess_image(image):
 # ============================================================
 
 def sigmoid(x):
-    """
-    Numerically stable sigmoid function.
-    """
 
     result = np.empty_like(
         x,
@@ -198,7 +203,9 @@ def sigmoid(x):
         )
     )
 
-    exp_x = np.exp(x[~positive])
+    exp_x = np.exp(
+        x[~positive]
+    )
 
     result[~positive] = (
         exp_x /
@@ -213,9 +220,6 @@ def sigmoid(x):
 # ============================================================
 
 def predict(image):
-    """
-    Run multi-label retinal disease prediction.
-    """
 
     if image is None:
         return {}
@@ -237,7 +241,6 @@ def predict(image):
             logits[0]
         )
 
-        # Top 10 predictions
         top_indices = np.argsort(
             probabilities
         )[::-1][:10]
