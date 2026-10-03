@@ -1,6 +1,5 @@
-torch
-torchvision
 gradio
-Pillow
 numpy
+Pillow
 huggingface_hub
+onnxruntime
