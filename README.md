@@ -37,3 +37,12 @@ demonstration only.
 
 It is not intended for medical diagnosis, treatment,
 or clinical decision-making.
+## Live Demo
+
+The deployed application is publicly available at:
+
+**[🌐 Launch RFMiD Multi-Disease Retinal AI](https://retinal-ai-research-demo.onrender.com)**
+
+The live application allows users to upload a retinal fundus image and view the model's predicted probabilities across the supported RFMiD disease classes.
+
+> **Note:** This is a research and educational prototype. The predictions are not intended for medical diagnosis or clinical decision-making.
