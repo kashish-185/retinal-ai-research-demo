@@ -1,193 +1,322 @@
-
 import os
-import json
 
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
-from PIL import Image
 import gradio as gr
-
+import numpy as np
+import onnxruntime as ort
 from huggingface_hub import hf_hub_download
+from PIL import Image
 
 
-# ============================================
+# ============================================================
 # Configuration
-# ============================================
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-CONFIG_PATH = os.path.join(
-    BASE_DIR,
-    "model_config.json"
-)
+# ============================================================
 
 HF_REPO_ID = "Kashish-goel185/retinal-ai-resnet50"
 
-MODEL_FILENAME = "reproduced_A0_resnet50.pth"
+MODEL_FILE = "reproduced_A0_resnet50.onnx"
+MODEL_DATA_FILE = "reproduced_A0_resnet50.onnx.data"
 
-DEVICE = torch.device("cpu")
-
-
-# ============================================
-# Load configuration
-# ============================================
-
-with open(CONFIG_PATH, "r") as f:
-    config = json.load(f)
-
-DISEASE_LABELS = config["disease_labels"]
-NUM_CLASSES = config["num_classes"]
+NUM_CLASSES = 45
 
 
-# ============================================
-# Download model from Hugging Face
-# ============================================
+DISEASE_LABELS = [
+    "DR",
+    "ARMD",
+    "MH",
+    "DN",
+    "MYA",
+    "BRVO",
+    "TSLN",
+    "ERM",
+    "LS",
+    "MS",
+    "CSR",
+    "ODC",
+    "CRVO",
+    "TV",
+    "AH",
+    "ODP",
+    "ODE",
+    "ST",
+    "AION",
+    "PT",
+    "RT",
+    "RS",
+    "CRS",
+    "EDN",
+    "RPEC",
+    "MHL",
+    "RP",
+    "CWS",
+    "CB",
+    "ODPM",
+    "PRH",
+    "MNF",
+    "HR",
+    "CRAO",
+    "TD",
+    "CME",
+    "PTCR",
+    "CF",
+    "VH",
+    "MCA",
+    "VS",
+    "BRAO",
+    "PLQ",
+    "HPED",
+    "CL",
+]
 
-print("Downloading/loading model from Hugging Face...")
+
+# ============================================================
+# Download ONNX model from Hugging Face
+# ============================================================
+
+print("Downloading ONNX model from Hugging Face...")
 
 MODEL_PATH = hf_hub_download(
     repo_id=HF_REPO_ID,
-    filename=MODEL_FILENAME
+    filename=MODEL_FILE
 )
 
-print(f"Model available at: {MODEL_PATH}")
-
-
-# ============================================
-# Create ResNet-50
-# ============================================
-
-model = models.resnet50(weights=None)
-
-model.fc = nn.Linear(
-    model.fc.in_features,
-    NUM_CLASSES
+MODEL_DATA_PATH = hf_hub_download(
+    repo_id=HF_REPO_ID,
+    filename=MODEL_DATA_FILE
 )
 
 
-# ============================================
-# Load checkpoint
-# ============================================
+if not os.path.exists(MODEL_PATH):
+    raise FileNotFoundError(
+        f"ONNX model not found: {MODEL_PATH}"
+    )
 
-checkpoint = torch.load(
+if not os.path.exists(MODEL_DATA_PATH):
+    raise FileNotFoundError(
+        f"ONNX external data file not found: {MODEL_DATA_PATH}"
+    )
+
+
+print("ONNX model downloaded successfully.")
+print("Model:", MODEL_PATH)
+print("External data:", MODEL_DATA_PATH)
+
+
+# ============================================================
+# ONNX Runtime CPU Session
+# ============================================================
+
+print("Creating ONNX Runtime CPU session...")
+
+session = ort.InferenceSession(
     MODEL_PATH,
-    map_location=DEVICE,
-    weights_only=False
+    providers=["CPUExecutionProvider"]
 )
 
-if "model_state_dict" in checkpoint:
-    model.load_state_dict(
-        checkpoint["model_state_dict"]
+INPUT_NAME = session.get_inputs()[0].name
+OUTPUT_NAME = session.get_outputs()[0].name
+
+print("Input:", INPUT_NAME)
+print("Output:", OUTPUT_NAME)
+
+print("ONNX Runtime initialized successfully.")
+
+
+# ============================================================
+# Image Preprocessing
+# Same preprocessing used by A0 ResNet-50
+# ============================================================
+
+MEAN = np.array(
+    [0.485, 0.456, 0.406],
+    dtype=np.float32
+)
+
+STD = np.array(
+    [0.229, 0.224, 0.225],
+    dtype=np.float32
+)
+
+
+def preprocess_image(image):
+    """
+    Convert uploaded retinal image into the exact
+    input format expected by the trained A0 model.
+    """
+
+    image = image.convert("RGB")
+
+    image = image.resize(
+        (224, 224),
+        Image.Resampling.BILINEAR
     )
-else:
-    model.load_state_dict(checkpoint)
 
-model.to(DEVICE)
-model.eval()
+    image_array = np.asarray(
+        image,
+        dtype=np.float32
+    ) / 255.0
 
-print("ResNet-50 loaded successfully.")
+    image_array = (
+        image_array - MEAN
+    ) / STD
 
-
-# ============================================
-# Same preprocessing as A0
-# ============================================
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
+    # HWC -> CHW
+    image_array = np.transpose(
+        image_array,
+        (2, 0, 1)
     )
-])
+
+    # Add batch dimension
+    image_array = np.expand_dims(
+        image_array,
+        axis=0
+    )
+
+    return image_array.astype(np.float32)
 
 
-# ============================================
-# Prediction function
-# ============================================
+# ============================================================
+# Numerically Stable Sigmoid
+# ============================================================
+
+def sigmoid(x):
+    """
+    Numerically stable sigmoid function.
+    """
+
+    result = np.empty_like(
+        x,
+        dtype=np.float32
+    )
+
+    positive = x >= 0
+
+    result[positive] = (
+        1.0 /
+        (
+            1.0 +
+            np.exp(-x[positive])
+        )
+    )
+
+    exp_x = np.exp(x[~positive])
+
+    result[~positive] = (
+        exp_x /
+        (1.0 + exp_x)
+    )
+
+    return result
+
+
+# ============================================================
+# Prediction
+# ============================================================
 
 def predict(image):
+    """
+    Run multi-label retinal disease prediction.
+    """
 
     if image is None:
         return {}
 
-    image = image.convert("RGB")
+    try:
 
-    input_tensor = transform(image)
-    input_tensor = input_tensor.unsqueeze(0)
-    input_tensor = input_tensor.to(DEVICE)
+        input_tensor = preprocess_image(
+            image
+        )
 
-    with torch.no_grad():
-        logits = model(input_tensor)
-        probabilities = torch.sigmoid(logits)[0]
+        logits = session.run(
+            [OUTPUT_NAME],
+            {
+                INPUT_NAME: input_tensor
+            }
+        )[0]
 
-    top_values, top_indices = torch.topk(
-        probabilities,
-        k=min(10, NUM_CLASSES)
-    )
+        probabilities = sigmoid(
+            logits[0]
+        )
 
-    results = {}
+        # Top 10 predictions
+        top_indices = np.argsort(
+            probabilities
+        )[::-1][:10]
 
-    for value, index in zip(
-        top_values,
-        top_indices
-    ):
-        disease = DISEASE_LABELS[index.item()]
-        percentage = float(value.item() * 100)
+        predictions = {
+            DISEASE_LABELS[int(index)]:
+            float(probabilities[int(index)])
+            for index in top_indices
+        }
 
-        results[disease] = percentage
+        return predictions
 
-    return results
+    except Exception as error:
+
+        print(
+            "Prediction error:",
+            error
+        )
+
+        return {}
 
 
-# ============================================
-# Gradio interface
-# ============================================
+# ============================================================
+# Medical Disclaimer
+# ============================================================
 
-description = """
-### Multi-Disease Retinal AI Research Prototype
+DISCLAIMER = """
+### Important
 
-Upload a retinal fundus image to obtain the model's
-top predicted disease probabilities.
+This is a **research demonstration** and is **not a medical
+diagnostic tool**. Predictions should not be used for clinical
+diagnosis or treatment decisions.
 
-**Model:** ResNet-50  
-**Dataset:** RFMiD  
-**Task:** Multi-label retinal disease classification  
-**Classes:** 45
-
-⚠️ **Research/Educational Use Only**
-
-This model is a research prototype and is NOT intended
-for medical diagnosis, treatment, or clinical decision-making.
+The model is provided for educational and research purposes only.
 """
+
+
+# ============================================================
+# Gradio Interface
+# ============================================================
 
 demo = gr.Interface(
     fn=predict,
+
     inputs=gr.Image(
         type="pil",
         label="Upload Retinal Fundus Image"
     ),
+
     outputs=gr.Label(
         num_top_classes=10,
-        label="Top Predictions"
+        label="Predicted Disease Probabilities"
     ),
-    title="Retinal AI — Multi-Disease Classification",
-    description=description,
+
+    title="Retinal AI Research Demonstration",
+
+    description=(
+        "Multi-disease retinal fundus image prediction "
+        "using a ResNet-50 model converted to ONNX."
+    ),
+
+    article=DISCLAIMER,
+
+    examples=None,
+
     flagging_mode="never"
 )
 
 
-# ============================================
+# ============================================================
 # Launch
-# ============================================
+# ============================================================
 
 if __name__ == "__main__":
 
     port = int(
         os.environ.get(
             "PORT",
-            10000
+            "10000"
         )
     )
 
